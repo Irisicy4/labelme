@@ -102,6 +102,16 @@ labelme data_annotated/  # Open directory to annotate all images in it
 labelme data_annotated/ --labels labels.txt  # specify label list with a file
 ```
 
+### Ground Truth Overlay & IoU Matching
+
+- When you open `<image>.json`, labelme looks for a sibling `<image>_gt.json`. If it exists, every shape in that file is rendered as a persistent yellow outline while you edit.
+- Both files follow the standard labelme schema. Reuse the same metadata (flags, group IDs, descriptions, etc.) and only adjust the point coordinates in the `_gt` copy to represent reference annotations.
+- Each editable shape is paired with the ground-truth shape of the same label that yields the highest Intersection-over-Union. The polygon list displays this as `GT# (IoU)` and a bold yellow badge is painted directly on the canvas so you can see the match while drawing or moving points.
+- Example naming (see `examples/semantic_segmentation/data_annotated`):
+  - `2011_000003.jpg` — source image.
+  - `2011_000003.json` — editable annotations saved by labelme.
+  - `2011_000003_gt.json` — optional ground-truth overlay that is auto-loaded and visualized.
+
 ### Command Line Arguments
 - `--output` specifies the location that annotations will be written to. If the location ends with .json, a single annotation will be written to this file. Only one image can be annotated if a location is specified with .json. If the location does not end with .json, the program will assume it is a directory. Annotations will be stored in this directory with a name that corresponds to the image that the annotation was made on.
 - The first time you run labelme, it will create a config file in `~/.labelmerc`. You can edit this file and the changes will be applied the next time that you launch labelme. If you would prefer to use a config file from another location, you can specify this file with the `--config` flag.

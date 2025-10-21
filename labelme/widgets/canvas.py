@@ -798,11 +798,16 @@ class Canvas(QtWidgets.QWidget):
                 shape.paint(p)
                 annotation = getattr(shape, "_ground_truth_annotation_text", None)
                 if annotation:
+                    polygon_color = QtGui.QColor(shape.line_color)
+                    outline_color = QtGui.QColor(polygon_color)
+                    outline_color.setAlpha(230)
+                    outline_color = outline_color.lighter(140)
                     self._draw_shape_annotation(
                         painter=p,
                         shape=shape,
                         text=annotation,
-                        color=QtGui.QColor(255, 215, 0, 255),
+                        fill_color=QtGui.QColor(255, 255, 210, 230),
+                        outline_color=outline_color,
                     )
         if self.current:
             self.current.paint(p)
@@ -815,11 +820,14 @@ class Canvas(QtWidgets.QWidget):
         for overlay_shape, overlay_tag in self.overlay_shapes:
             overlay_shape.paint(p)
             if overlay_tag:
+                highlight_fill = QtGui.QColor(255, 255, 190, 220)
+                highlight_outline = QtGui.QColor(255, 215, 0, 240)
                 self._draw_shape_annotation(
                     painter=p,
                     shape=overlay_shape,
                     text=overlay_tag,
-                    color=QtGui.QColor(255, 215, 0, 255),
+                    fill_color=highlight_fill,
+                    outline_color=highlight_outline,
                 )
 
         if not self.current or self.createMode not in [
@@ -1109,25 +1117,36 @@ class Canvas(QtWidgets.QWidget):
         painter: QtGui.QPainter,
         shape: Shape,
         text: str,
-        color: QtGui.QColor,
+        fill_color: QtGui.QColor,
+        outline_color: QtGui.QColor,
     ) -> None:
         if not text:
             return
         painter.save()
-        pen = QtGui.QPen(color)
-        painter.setPen(pen)
         font = painter.font()
-        font.setPointSize(max(8, int(font.pointSize() * 0.9)))
+        base_point_size = font.pointSize()
+        if base_point_size <= 0:
+            base_point_size = 12
+        font.setPointSize(max(18, int(base_point_size * 1.6)))
+        font.setBold(True)
         painter.setFont(font)
 
         rect = shape.boundingRect()
         if shape.shape_type == "mask" and len(shape.points) >= 2:
             rect = QtCore.QRectF(shape.points[0], shape.points[1])
 
-        center = rect.center()
-        center = shape._scale_point(center)
+        center = shape._scale_point(rect.center())
+        metrics = QtGui.QFontMetricsF(font)
+        text_width = metrics.horizontalAdvance(text)
+        baseline = center.y() + (metrics.ascent() - metrics.descent()) / 2.0
+        origin_x = center.x() - text_width / 2.0
 
-        painter.drawText(center, text)
+        path = QtGui.QPainterPath()
+        path.addText(QtCore.QPointF(origin_x, baseline), font, text)
+
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(fill_color)
+        painter.drawPath(path)
         painter.restore()
 
 

@@ -1465,7 +1465,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.loadShapes(shapes=shapes)
 
     def _style_ground_truth_shape(self, shape: Shape) -> None:
-        highlight = QtGui.QColor(255, 215, 0, 255)
+        highlight = QtGui.QColor(255, 255, 190, 255)
         transparent = QtGui.QColor(highlight)
         transparent.setAlpha(0)
 
@@ -1537,7 +1537,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for idx, shape in enumerate(gt_shapes, start=1):
             self._ground_truth_indices[shape] = idx
             self._ground_truth_mask_cache[shape] = None
-            overlay_entries.append((shape, str(idx)))
+            overlay_entries.append((shape, f"GT{idx}"))
 
         self.canvas.setOverlayShapes(overlay_entries)
         self._update_ground_truth_matches()
