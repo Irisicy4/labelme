@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 from typing import Literal
+from typing import Sequence
 
 import imgviz
 import numpy as np
@@ -89,6 +90,7 @@ class Canvas(QtWidgets.QWidget):
         self.mode = self.EDIT
         self.shapes = []
         self.shapesBackups = []
+        self.overlay_shapes: list[tuple[Shape, str | None]] = []
         self.current = None
         self.selectedShapes = []  # save the selected shapes here
         self.selectedShapesCopy = []
@@ -794,6 +796,14 @@ class Canvas(QtWidgets.QWidget):
             if (shape.selected or not self._hideBackround) and self.isVisible(shape):
                 shape.fill = shape.selected or shape == self.hShape
                 shape.paint(p)
+                annotation = getattr(shape, "_ground_truth_annotation_text", None)
+                if annotation:
+                    self._draw_shape_annotation(
+                        painter=p,
+                        shape=shape,
+                        text=annotation,
+                        color=QtGui.QColor(255, 215, 0, 255),
+                    )
         if self.current:
             self.current.paint(p)
             assert len(self.line.points) == len(self.line.point_labels)
@@ -801,6 +811,16 @@ class Canvas(QtWidgets.QWidget):
         if self.selectedShapesCopy:
             for s in self.selectedShapesCopy:
                 s.paint(p)
+
+        for overlay_shape, overlay_tag in self.overlay_shapes:
+            overlay_shape.paint(p)
+            if overlay_tag:
+                self._draw_shape_annotation(
+                    painter=p,
+                    shape=overlay_shape,
+                    text=overlay_tag,
+                    color=QtGui.QColor(255, 215, 0, 255),
+                )
 
         if not self.current or self.createMode not in [
             "polygon",
@@ -1053,6 +1073,15 @@ class Canvas(QtWidgets.QWidget):
         self.hEdge = None
         self.update()
 
+    def setOverlayShapes(
+        self, shapes: Sequence[tuple[Shape, str | None]] | None
+    ) -> None:
+        if shapes is None:
+            self.overlay_shapes = []
+        else:
+            self.overlay_shapes = list(shapes)
+        self.update()
+
     def setShapeVisible(self, shape, value):
         self.visible[shape] = value
         self.update()
@@ -1072,7 +1101,34 @@ class Canvas(QtWidgets.QWidget):
         self.restoreCursor()
         self.pixmap = QtGui.QPixmap()
         self.shapesBackups = []
+        self.overlay_shapes = []
         self.update()
+
+    def _draw_shape_annotation(
+        self,
+        painter: QtGui.QPainter,
+        shape: Shape,
+        text: str,
+        color: QtGui.QColor,
+    ) -> None:
+        if not text:
+            return
+        painter.save()
+        pen = QtGui.QPen(color)
+        painter.setPen(pen)
+        font = painter.font()
+        font.setPointSize(max(8, int(font.pointSize() * 0.9)))
+        painter.setFont(font)
+
+        rect = shape.boundingRect()
+        if shape.shape_type == "mask" and len(shape.points) >= 2:
+            rect = QtCore.QRectF(shape.points[0], shape.points[1])
+
+        center = rect.center()
+        center = shape._scale_point(center)
+
+        painter.drawText(center, text)
+        painter.restore()
 
 
 def _update_shape_with_sam(

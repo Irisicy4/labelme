@@ -42,6 +42,7 @@ from labelme.widgets import ZoomWidget
 from labelme.widgets import download_ai_model
 
 from . import utils
+from labelme.utils import shape as shape_utils
 
 # FIXME
 # - [medium] Set max zoom value to something big enough for FitWidth/Window
@@ -196,6 +197,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
+        self.canvas.newShape.connect(self._update_ground_truth_matches)
+        self.canvas.shapeMoved.connect(self._update_ground_truth_matches)
 
         self.setCentralWidget(scrollArea)
 
@@ -1108,6 +1111,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelFile = None
         self.otherData = None
         self.canvas.resetState()
+        self._ground_truth_shapes = []
+        self._ground_truth_indices = {}
+        self._ground_truth_mask_cache = {}
 
     def currentItem(self):
         items = self.labelList.selectedItems()
@@ -1269,19 +1275,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 shape.description = description
 
             self._update_shape_color(shape)
-            if shape.group_id is None:
-                r, g, b = shape.fill_color.getRgb()[:3]
-                item.setText(
-                    f"{html.escape(shape.label)} "
-                    f'<font color="#{r:02x}{g:02x}{b:02x}">●</font>'
-                )
-            else:
-                item.setText(f"{shape.label} ({shape.group_id})")
+            self._set_label_item_text(item, shape)
             self.setDirty()
             if self.uniqLabelList.find_label_item(shape.label) is None:
                 self.uniqLabelList.add_label_item(
                     label=shape.label, color=self._get_rgb_by_label(label=shape.label)
                 )
+
+        self._update_ground_truth_matches()
 
     def fileSearchChanged(self):
         self.importDirImages(
@@ -1325,11 +1326,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.edit.setEnabled(n_selected)
 
     def addLabel(self, shape):
-        if shape.group_id is None:
-            text = shape.label
-        else:
-            text = f"{shape.label} ({shape.group_id})"
-        label_list_item = LabelListWidgetItem(text, shape)
+        label_list_item = LabelListWidgetItem(self._shape_display_name(shape), shape)
         self.labelList.addItem(label_list_item)
         if self.uniqLabelList.find_label_item(shape.label) is None:
             self.uniqLabelList.add_label_item(
@@ -1340,10 +1337,7 @@ class MainWindow(QtWidgets.QMainWindow):
             action.setEnabled(True)
 
         self._update_shape_color(shape)
-        r, g, b = shape.fill_color.getRgb()[:3]
-        label_list_item.setText(
-            f'{html.escape(text)} <font color="#{r:02x}{g:02x}{b:02x}">●</font>'
-        )
+        self._set_label_item_text(label_list_item, shape)
 
     def _update_shape_color(self, shape):
         r, g, b = self._get_rgb_by_label(shape.label)
@@ -1401,23 +1395,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList.clearSelection()
         self._noSelectionSlot = False
         self.canvas.loadShapes(shapes, replace=replace)
+        self._update_ground_truth_matches()
 
-    def _load_shape_dicts(self, shape_dicts: list[ShapeDict]) -> None:
-        shapes: list[Shape] = []
-        shape_dict: ShapeDict
-        for shape_dict in shape_dicts:
-            shape: Shape = Shape(
-                label=shape_dict["label"],
-                shape_type=shape_dict["shape_type"],
-                group_id=shape_dict["group_id"],
-                description=shape_dict["description"],
-                mask=shape_dict["mask"],
+    def _shape_display_name(self, shape: Shape) -> str:
+        if shape.group_id is None:
+            return shape.label
+        return f"{shape.label} ({shape.group_id})"
+
+    def _set_label_item_text(
+        self,
+        item: LabelListWidgetItem,
+        shape: Shape,
+    ) -> None:
+        base_text = html.escape(self._shape_display_name(shape))
+        r, g, b, _ = shape.fill_color.getRgb()
+        color_dot = f'<font color="#{r:02x}{g:02x}{b:02x}">●</font>'
+        match_info = getattr(shape, "_ground_truth_match", None)
+        if match_info:
+            match_html = (
+                f' <span style="color:#ffd700">GT{match_info["index"]} '
+                f'({match_info["iou"]:.2f})</span>'
             )
-            for x, y in shape_dict["points"]:
-                shape.addPoint(QtCore.QPointF(x, y))
-            shape.close()
+        else:
+            match_html = ""
+        item.setText(f"{base_text} {color_dot}{match_html}")
 
-            default_flags = {}
+    def _refresh_label_items(self) -> None:
+        for item in self.labelList:
+            shape = item.shape()
+            if shape is None:
+                continue
+            self._set_label_item_text(item, shape)
+
+    def _shape_from_dict(
+        self,
+        shape_dict: ShapeDict,
+        *,
+        assign_flags: bool = True,
+    ) -> Shape:
+        shape: Shape = Shape(
+            label=shape_dict["label"],
+            shape_type=shape_dict["shape_type"],
+            group_id=shape_dict["group_id"],
+            description=shape_dict["description"],
+            mask=shape_dict["mask"],
+        )
+        for x, y in shape_dict["points"]:
+            shape.addPoint(QtCore.QPointF(x, y))
+        shape.close()
+
+        if assign_flags:
+            default_flags: dict[str, bool] = {}
             if self._config["label_flags"]:
                 for pattern, keys in self._config["label_flags"].items():
                     if re.match(pattern, shape.label):
@@ -1425,10 +1453,218 @@ class MainWindow(QtWidgets.QMainWindow):
                             default_flags[key] = False
             shape.flags = default_flags
             shape.flags.update(shape_dict["flags"])
-            shape.other_data = shape_dict["other_data"]
+        else:
+            shape.flags = dict(shape_dict["flags"])
+        shape.other_data = shape_dict["other_data"]
+        return shape
 
-            shapes.append(shape)
+    def _load_shape_dicts(self, shape_dicts: list[ShapeDict]) -> None:
+        shapes: list[Shape] = [
+            self._shape_from_dict(shape_dict=shape_dict) for shape_dict in shape_dicts
+        ]
         self.loadShapes(shapes=shapes)
+
+    def _style_ground_truth_shape(self, shape: Shape) -> None:
+        highlight = QtGui.QColor(255, 215, 0, 255)
+        transparent = QtGui.QColor(highlight)
+        transparent.setAlpha(0)
+
+        shape.fill = False
+        shape.selected = False
+        shape.line_color = highlight
+        shape.select_line_color = highlight
+        shape.fill_color = transparent
+        shape.select_fill_color = transparent
+        shape.vertex_fill_color = transparent
+        shape.hvertex_fill_color = transparent
+        shape.point_size = 0
+        shape.PEN_WIDTH = 3
+
+    def _load_ground_truth_overlay(self, *paths: str | None) -> None:
+        candidate_paths: list[str] = []
+        for path in paths:
+            if not path:
+                continue
+            base, _ = osp.splitext(path)
+            if not base or base.endswith("_gt"):
+                continue
+            candidate = f"{base}_gt{LabelFile.suffix}"
+            if candidate not in candidate_paths:
+                candidate_paths.append(candidate)
+
+        gt_path = next((p for p in candidate_paths if QtCore.QFile.exists(p)), None)
+        if gt_path is None:
+            self._ground_truth_shapes = []
+            self._ground_truth_indices = {}
+            self._ground_truth_mask_cache = {}
+            self.canvas.setOverlayShapes(None)
+            self._update_ground_truth_matches()
+            return
+
+        try:
+            gt_label_file = LabelFile(gt_path)
+        except LabelFileError as e:
+            logger.warning(
+                "Failed to load ground truth annotations from {!r}: {}", gt_path, e
+            )
+            self.canvas.setOverlayShapes(None)
+            self._ground_truth_shapes = []
+            self._ground_truth_indices = {}
+            self._ground_truth_mask_cache = {}
+            self._update_ground_truth_matches()
+            return
+
+        gt_shapes: list[Shape] = [
+            self._shape_from_dict(shape_dict=shape_dict, assign_flags=False)
+            for shape_dict in gt_label_file.shapes
+        ]
+
+        if not gt_shapes:
+            self.canvas.setOverlayShapes(None)
+            self._ground_truth_shapes = []
+            self._ground_truth_indices = {}
+            self._ground_truth_mask_cache = {}
+            self._update_ground_truth_matches()
+            return
+
+        for shape in gt_shapes:
+            self._style_ground_truth_shape(shape)
+
+        self._ground_truth_shapes = gt_shapes
+        self._ground_truth_indices = {}
+        self._ground_truth_mask_cache = {}
+        overlay_entries: list[tuple[Shape, str]] = []
+        for idx, shape in enumerate(gt_shapes, start=1):
+            self._ground_truth_indices[shape] = idx
+            self._ground_truth_mask_cache[shape] = None
+            overlay_entries.append((shape, str(idx)))
+
+        self.canvas.setOverlayShapes(overlay_entries)
+        self._update_ground_truth_matches()
+
+    def _shape_to_mask_array(self, shape: Shape) -> np.ndarray | None:
+        if self.image is None or self.image.isNull():
+            return None
+
+        height = self.image.height()
+        width = self.image.width()
+        if height <= 0 or width <= 0:
+            return None
+
+        img_shape = (height, width)
+        if shape.shape_type == "mask" and shape.mask is not None:
+            if len(shape.points) < 2:
+                return None
+
+            mask = np.zeros(img_shape, dtype=bool)
+            p1 = shape.points[0]
+            p2 = shape.points[1]
+            x1 = int(math.floor(min(p1.x(), p2.x())))
+            x2 = int(math.ceil(max(p1.x(), p2.x())))
+            y1 = int(math.floor(min(p1.y(), p2.y())))
+            y2 = int(math.ceil(max(p1.y(), p2.y())))
+
+            if x1 >= width or y1 >= height or x2 <= 0 or y2 <= 0:
+                return None
+
+            x1 = max(0, min(x1, width - 1))
+            y1 = max(0, min(y1, height - 1))
+            x2 = max(x1 + 1, min(x2, width))
+            y2 = max(y1 + 1, min(y2, height))
+
+            mask_slice = shape.mask.astype(bool)
+            expected_h = y2 - y1
+            expected_w = x2 - x1
+            mask_slice = mask_slice[:expected_h, :expected_w]
+            mask[y1 : y1 + mask_slice.shape[0], x1 : x1 + mask_slice.shape[1]] = (
+                mask_slice
+            )
+            return mask
+
+        points = [[point.x(), point.y()] for point in shape.points]
+        if not points:
+            return None
+
+        try:
+            mask = shape_utils.shape_to_mask(img_shape, points, shape.shape_type)
+        except (AssertionError, ValueError):
+            return None
+
+        return mask.astype(bool)
+
+    @staticmethod
+    def _compute_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
+        if mask_a.shape != mask_b.shape:
+            raise ValueError("Mask shapes must match to compute IoU")
+
+        intersection = np.logical_and(mask_a, mask_b).sum()
+        union = np.logical_or(mask_a, mask_b).sum()
+        if union == 0:
+            return 0.0
+        return float(intersection / union)
+
+    def _update_ground_truth_matches(self) -> None:
+        if not hasattr(self, "canvas") or not hasattr(self.canvas, "shapes"):
+            return
+
+        shapes: list[Shape] = list(self.canvas.shapes)
+        if not shapes:
+            self._refresh_label_items()
+            self.canvas.update()
+            return
+
+        for shape in shapes:
+            setattr(shape, "_ground_truth_match", None)
+            setattr(shape, "_ground_truth_annotation_text", None)
+
+        if not self._ground_truth_shapes or self.image is None or self.image.isNull():
+            self._refresh_label_items()
+            self.canvas.update()
+            return
+
+        gt_by_label: dict[str, list[tuple[int, np.ndarray]]] = {}
+        for gt_shape in self._ground_truth_shapes:
+            if not gt_shape.label:
+                continue
+            idx = self._ground_truth_indices.get(gt_shape)
+            if idx is None:
+                continue
+
+            mask = self._ground_truth_mask_cache.get(gt_shape)
+            if mask is None:
+                mask = self._shape_to_mask_array(gt_shape)
+                self._ground_truth_mask_cache[gt_shape] = mask
+            if mask is None:
+                continue
+
+            gt_by_label.setdefault(gt_shape.label, []).append((idx, mask))
+
+        for shape in shapes:
+            if not shape.label or shape.label not in gt_by_label:
+                continue
+
+            candidate_masks = gt_by_label[shape.label]
+            mask = self._shape_to_mask_array(shape)
+            if mask is None:
+                continue
+
+            best_idx = None
+            best_iou = -1.0
+            for idx, gt_mask in candidate_masks:
+                iou = self._compute_iou(mask, gt_mask)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = idx
+
+            if best_idx is None:
+                continue
+
+            shape._ground_truth_match = {"index": best_idx, "iou": best_iou}
+            shape._ground_truth_annotation_text = f"GT{best_idx} ({best_iou:.2f})"
+
+        self._refresh_label_items()
+        self.canvas.update()
+
 
     def loadFlags(self, flags):
         self.flag_widget.clear()  # type: ignore[union-attr]
@@ -1528,6 +1764,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def labelOrderChanged(self):
         self.setDirty()
         self.canvas.loadShapes([item.shape() for item in self.labelList])
+        self._update_ground_truth_matches()
 
     # Callback functions:
 
@@ -1757,6 +1994,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._load_shape_dicts(shape_dicts=self.labelFile.shapes)
             if self.labelFile.flags is not None:
                 flags.update(self.labelFile.flags)
+        self._load_ground_truth_overlay(
+            filename,
+            self.imagePath,
+            self.labelFile.filename if self.labelFile else None,
+        )
         self.loadFlags(flags)
         if self._config["keep_prev"] and self.noShapes():
             self.loadShapes(prev_shapes, replace=False)
